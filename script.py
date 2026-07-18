@@ -35,7 +35,7 @@ def test_client_isolation():
     # Send 10 requests as bob (free, capacity=3) — alice being throttled should NOT affect bob
     print("\n--- Phase 2: Bob sends 10 rapid requests (free tier, capacity=3) ---")
     for i in range(10):
-        resp = requests.get('http://localhost:8000/api/ping?tier=free', headers={
+        resp = requests.get('http://localhost:8000/api/tweets?tier=free', headers={
             'X-Client-Id': 'bob'
         })
         status = resp.status_code
