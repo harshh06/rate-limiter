@@ -1,72 +1,109 @@
 # Rate Limiter (Python + FastAPI)
 
-A rate limiter built from scratch to learn how token bucket rate limiting actually works
+A rate limiter built from scratch to learn how token bucket rate limiting actually works.
 
-## Status: Single Client, Single Process, Token Bucket (In-Memory)
+## Status: Multi-Client, Tier-Based, Token Bucket (In-Memory)
 
-Currently supports a single hardcoded client (`alice`) hitting a dummy protected endpoint,
-rate-limited via the Token Bucket algorithm, with state held in memory (no persistence,
-no distribution yet).
+Supports multiple clients identified by `X-Client-Id` header, each with their own
+independent token bucket created lazily on first request. Clients are assigned a tier
+via the `tier` query param (`free` or `premium`), which determines their rate limit capacity.
 
 ## How it works
 
-- Each client has a `TokenBucket`: a starting `tokens` count, a `capacity` (max tokens can
-  ever refill to), a `refill_rate` (tokens added per second), and a `last_refill_time`.
+- Each client has a `TokenBucket`: a `capacity` (max tokens), a `refill_rate`
+  (tokens added per second), current `tokens`, and a `last_refill_time`.
+- Capacity is determined by client tier:
+  - `premium`: 10 requests
+  - `free`: 3 requests
 - On every request:
-  1. Calculate elapsed time since `last_refill_time`.
-  2. Add `elapsed_seconds * refill_rate` tokens, capped at `capacity`.
-  3. Update `last_refill_time` to now.
-  4. If at least 1 token is available: allow the request, deduct 1 token.
-  5. Otherwise: reject with `429 Too Many Requests`.
+  1. Identify the client via the `X-Client-Id` header.
+  2. If the client has no bucket yet, create one (lazy initialization).
+  3. Calculate elapsed time since `last_refill_time`.
+  4. Add `elapsed_seconds * refill_rate` tokens, capped at `capacity`.
+  5. Update `last_refill_time` to now.
+  6. If at least 1 token is available: allow the request, deduct 1 token.
+  7. Otherwise: reject with `429 Too Many Requests`.
 - Refilling is **lazy** — it's calculated on-demand at request time based on elapsed time,
   not on a background timer/loop.
+
+## Project structure
+
+```
+├── main.py       # FastAPI app and route handler
+├── models.py     # TokenBucket class and tier config
+├── utils.py      # Token refill logic
+├── script.py     # Test script for client isolation
+└── pyproject.toml
+```
 
 ## Running the server
 
 ```bash
+# Using FastAPI CLI (recommended for development)
+fastapi dev
+
+# Or using uvicorn directly
 uvicorn main:app --reload --port 8000
 ```
 
-(adjust `main` to match your actual filename)
+## API
+
+### `GET /api/ping`
+
+**Headers:**
+- `X-Client-Id` (required): Client identifier string
+
+**Query params:**
+- `tier` (required): `free` or `premium`
+
+**Response headers:**
+- `X-RateLimit-Limit`: Max tokens (capacity)
+- `X-RateLimit-Remaining`: Tokens left after this request
+- `X-RateLimit-Reset`: (on 429) When the next token will be available
+
+**Example:**
+```bash
+curl -i 'localhost:8000/api/ping?tier=premium' -H 'X-Client-Id: alice'
+```
 
 ## Testing
 
-### Basic burst test (no delay between requests)
+### Test script
 
-Fires 20 requests back-to-back to see burst capacity get exhausted:
+Run the test script to verify client isolation and tier-based rate limiting:
 
 ```bash
-for i in {1..20}; do curl -s -o /dev/null -w "%{http_code}\n" localhost:8000/api/ping; done
+uv run python script.py
 ```
 
-Expected: the first `tokens` (starting count) requests return `200`, the rest return `429`,
-since almost no time passes between requests for meaningful refill to occur.
+This script:
+- Sends 20 rapid requests as `alice` (premium, capacity=10) — confirms 10 pass, 10 throttled
+- Sends 10 requests as `bob` (free, capacity=3) — confirms 3 pass, 7 throttled
+- Verifies bob is NOT affected by alice's throttling (client isolation)
+- Tests that requests without `X-Client-Id` return 400
 
-### Refill test (with delay between requests)
-
-Fires requests roughly 1 second apart, to observe tokens regenerating over time:
+### Manual curl tests
 
 ```bash
+# Burst test — fires 20 requests back-to-back
 for i in {1..20}; do
-  curl -s -o /dev/null -w "%{http_code}\n" localhost:8000/api/ping
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    'localhost:8000/api/ping?tier=premium' \
+    -H 'X-Client-Id: alice'
+done
+
+# Refill test — fires requests 1 second apart
+for i in {1..20}; do
+  curl -s -o /dev/null -w "%{http_code}\n" \
+    'localhost:8000/api/ping?tier=premium' \
+    -H 'X-Client-Id: alice'
   sleep 1
 done
 ```
 
-Expected: fewer/no rejections, since tokens are refilling between requests
-(depending on your configured `refill_rate`).
-
-### Inspecting response headers
-
-To see rate-limit headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`,
-`X-RateLimit-Reset`), use `-i` instead of `-s -o /dev/null -w`:
-
-```bash
-curl -i localhost:8000/api/ping
-```
-
 ## Known limitations (by design, for now)
 
-- Single hardcoded client (`alice`) 
 - In-memory state only — a single process, single dictionary. This will visibly break
   once multiple server instances are introduced, which is intentional, fixed via Redis later.
+- Tier is passed as a query param on every request — only used on first request to create
+  the bucket. A real system would look this up from a database.

@@ -1,11 +1,13 @@
+from fastapi import Request
 from fastapi.responses import JSONResponse
-from fastapi import Response
-from datetime import timedelta
-from math import floor
-from fastapi import status
-from fastapi import HTTPException
-from fastapi import FastAPI
-from datetime import time, datetime
+from datetime import timedelta, datetime
+from fastapi import status, HTTPException, FastAPI
+
+
+from utils import update_tokens
+
+from models import TokenBucket
+
 
 app = FastAPI()
 
@@ -15,53 +17,44 @@ def read_root():
 
 
 @app.get("/api/ping")
-def ping():
+def ping(request: Request):
+    client_id = request.headers.get('X-Client-Id')
+    if not client_id:
+        raise HTTPException(status_code=400, detail="X-Client-Id header required")
+
+    client_tier=request.query_params["tier"]
+
+    if client_id not in bucket:
+        bucket[client_id] = TokenBucket(tier=client_tier)
+
     current_time = datetime.now()
-    last_refill_time = bucket["alice"].last_refill_time
-    elapsed_time = current_time - last_refill_time
-    elapsed_time_in_sec = elapsed_time.total_seconds()
-    updated_tokens = min( floor((elapsed_time_in_sec * bucket["alice"].refill_rate) + bucket["alice"].tokens), bucket["alice"].capacity )
-    bucket["alice"].last_refill_time=current_time
-    bucket["alice"].tokens = updated_tokens
+    bucket[client_id].tokens = update_tokens(bucket[client_id], current_time)
 
-    print("elapsed time", elapsed_time_in_sec)
-    print("tokens left", bucket["alice"].tokens)
-
-    if bucket["alice"].tokens >= 1:
-        bucket["alice"].tokens -= 1
+    if bucket[client_id].tokens >= 1:
+        bucket[client_id].tokens -= 1
         return JSONResponse(
             content={"message": "Server pinged"},
             status_code=200,
             headers={
-                "X-RateLimit-Limit": str(bucket["alice"].capacity),
-                "X-RateLimit-Remaining": str(bucket["alice"].tokens)
+                "X-RateLimit-Limit": str(bucket[client_id].capacity),
+                "X-RateLimit-Remaining": str(bucket[client_id].tokens)
             }
         )
     else :
-        seconds_until_next_token = (1 - bucket["alice"].tokens) / bucket["alice"].refill_rate
+        seconds_until_next_token = (1 - bucket[client_id].tokens) / bucket[client_id].refill_rate
         reset_time = current_time + timedelta(seconds=seconds_until_next_token)
         raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Rate limit reached",
                 headers={
-                    "X-RateLimit-Limit": str(bucket["alice"].capacity),
-                    "X-RateLimit-Remaining": str(bucket["alice"].tokens),
+                    "X-RateLimit-Limit": str(bucket[client_id].capacity),
+                    "X-RateLimit-Remaining": str(bucket[client_id].tokens),
                     "X-RateLimit-Reset": str(reset_time)
                 }
             )
 
 
-class TokenBucket():
-    def __init__(self, tokens=10, capacity=10, refill_rate=10):
-        self.tokens = tokens
-        self.capacity = capacity
-        self.refill_rate = refill_rate #tokens added per second
-        self.last_refill_time = datetime.now()
-        
-
-bucket = {
-    "alice": TokenBucket()
-}
+bucket = {}
 
 def main():
     print("Hello from rate-limiter!")
